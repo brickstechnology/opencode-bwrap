@@ -1,0 +1,22 @@
+{
+  "name": "@bricks/opencode-bwrap",
+  "version": "0.0.1",
+  "description": "OpenCode plugin: run agent bash inside a per-session bubblewrap jail rooted at /workspace.",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "latest",
+    "@types/bun": "latest",
+    "typescript": "^5"
+  }
+}
