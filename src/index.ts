@@ -1,18 +1,29 @@
 import type { Plugin } from '@opencode-ai/plugin';
-import { bashTool } from './bash';
+import { wrapBashCommand } from './bwrap';
+import { CONFIG } from './config';
 
 /**
- * opencode-bwrap — override the built-in `bash` tool so every agent-run shell
- * command executes inside a per-session bubblewrap jail rooted at `/workspace`
- * (the session's real dir, `ctx.directory`). Filesystem-confines arbitrary
- * model/repo code and scrubs pod secrets from the shell env.
+ * opencode-bwrap — confine the OpenCode agent's shell. We hook
+ * `tool.execute.before` and rewrite the built-in `bash` tool's command so it
+ * re-execs inside a per-session bubblewrap jail rooted at `/workspace` (the
+ * session's real cwd). Filesystem-confines arbitrary model/repo code and scrubs
+ * pod secrets from the shell env — while the built-in bash keeps its live
+ * output streaming, timeout, and truncation (we modify its args, not replace
+ * the tool; registering a same-name tool merely duplicates it in opencode 1.17).
  *
- * Only `bash` is overridden — the path-based file tools (read/write/edit/grep)
- * are confined separately by a `tool.execute.before` path-guard (a deferred
- * follow-up; see README "Roadmap"). Loaded via opencode's `plugin` config key.
+ * The path-based file tools (read/write/edit/grep) are a deferred follow-up
+ * (a path-guard in the same hook); see README "Roadmap". Loaded via the
+ * `plugin` config key.
  */
 export const BwrapJail: Plugin = async () => ({
-  tool: { bash: bashTool },
+  'tool.execute.before': async (input, output) => {
+    if (input.tool === 'bash' && typeof output.args?.command === 'string') {
+      output.args.command = wrapBashCommand(output.args.command, {
+        roBinds: CONFIG.roBinds,
+        envPass: CONFIG.envPass,
+      });
+    }
+  },
 });
 
 export default BwrapJail;

@@ -33,14 +33,10 @@ export const DEFAULT_ENV_PASS = [
   'SSL_CERT_FILE',
 ] as const;
 
-export interface BwrapOptions {
-  /** Real per-session dir (opencode `ctx.directory`) → bound to `/workspace`. */
-  taskDir: string;
-  /** The shell command the agent asked to run. */
-  command: string;
-  /** Read-only binds; caller existence-filters via {@link resolveBinds}. */
+export interface WrapOptions {
+  /** Read-only binds; existence-filtered at runtime via {@link resolveBinds}. */
   roBinds?: readonly string[];
-  /** Env var names to forward; all others are cleared. */
+  /** Env var names to forward into the jail; all others are cleared. */
   envPass?: readonly string[];
   /** Mount point the task dir appears at inside the jail. */
   workspace?: string;
@@ -51,34 +47,43 @@ export function resolveBinds(binds: readonly string[] = DEFAULT_RO_BINDS): strin
   return binds.filter(p => existsSync(p));
 }
 
-/**
- * Build the `bwrap` argv for one jailed command. Encodes the S0 gate findings
- * measured on the BACK-stack worker nodes (sparktok-workers ns, 2026-06-25):
- *
- *   - `--bind /proc /proc`, NOT `--proc /proc`: the container runtime masks
- *     parts of /proc, so an unprivileged user namespace is forbidden from
- *     mounting a fresh procfs (EPERM). Binding the existing proc works.
- *   - net is left SHARED (no `--unshare-net`) — the egress proxy (ADR-178)
- *     must stay reachable for git clone/push.
- *   - `--clearenv` + an allowlist scrub the model/worker secrets the opencode
- *     process carries out of the agent's shell.
- *
- * Pure assembly: callers resolve bind existence + supply the env; this only
- * builds the argv array (the unit-tested heart of the plugin).
- */
-export function buildBwrapArgv(opts: BwrapOptions): string[] {
-  const ws = opts.workspace ?? '/workspace';
-  const argv: string[] = [];
+/** POSIX single-quote escape for a shell literal. */
+function shq(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
 
-  for (const p of opts.roBinds ?? resolveBinds()) {
-    argv.push('--ro-bind', p, p);
+/**
+ * Rewrite a bash command so it runs inside a per-session bubblewrap jail rooted
+ * at `/workspace`. Returned as a **shell string** the built-in OpenCode `bash`
+ * tool will exec — NOT a spawn argv. We hook `tool.execute.before` and replace
+ * `output.args.command` with this (OpenCode's documented pattern for modifying
+ * bash), rather than registering a competing `bash` tool — which in opencode
+ * 1.17 *adds a duplicate* instead of replacing, and would forfeit the built-in's
+ * live output streaming + timeout. This keeps all of that.
+ *
+ * Key points, verified on the BACK-stack worker nodes (S0/S1, 2026-06-25):
+ *   - `--bind /proc /proc`, NOT `--proc /proc`: the runtime masks /proc, so a
+ *     fresh procfs in an unprivileged userns is EPERM.
+ *   - `--bind "$(pwd)" /workspace`: the built-in bash already runs in the
+ *     session's real dir, so `$(pwd)` (expanded by its own shell) binds exactly
+ *     that — no session lookup needed.
+ *   - net left SHARED (no `--unshare-net`) for the ADR-178 egress proxy.
+ *   - `--clearenv` + an allowlist (forwarded as `"$VAR"`, expanded by the outer
+ *     shell, only when set) scrub the model/worker secrets out of agent bash.
+ */
+export function wrapBashCommand(command: string, opts: WrapOptions = {}): string {
+  const ws = opts.workspace ?? '/workspace';
+  const parts: string[] = ['exec', 'bwrap'];
+
+  for (const p of resolveBinds(opts.roBinds)) {
+    parts.push('--ro-bind', p, p);
   }
 
-  argv.push(
+  parts.push(
     '--bind', '/proc', '/proc', // S0: fresh `--proc` is EPERM under proc-masking
     '--dev', '/dev',
     '--tmpfs', '/tmp',
-    '--bind', opts.taskDir, ws,
+    '--bind', '"$(pwd)"', ws, // the outer shell's cwd = the session's real dir
     '--chdir', ws,
     '--unshare-user',
     '--unshare-pid',
@@ -90,11 +95,12 @@ export function buildBwrapArgv(opts: BwrapOptions): string[] {
   );
 
   for (const k of opts.envPass ?? DEFAULT_ENV_PASS) {
-    const v = process.env[k];
-    if (v !== undefined) argv.push('--setenv', k, v);
+    if (process.env[k] !== undefined) {
+      parts.push('--setenv', k, `"$${k}"`); // expanded by the outer shell
+    }
   }
-  argv.push('--setenv', 'HOME', ws, '--setenv', 'PWD', ws);
+  parts.push('--setenv', 'HOME', ws, '--setenv', 'PWD', ws);
 
-  argv.push('bash', '-lc', opts.command);
-  return argv;
+  parts.push('bash', '-lc', shq(command));
+  return parts.join(' ');
 }
