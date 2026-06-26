@@ -80,15 +80,11 @@ export function buildBwrapArgv(opts: ArgvOptions): string[] {
     '--bind', '/proc', '/proc',
     '--dev', '/dev',
     '--tmpfs', '/tmp',
+    // The task dir is bound ONLY at /workspace — the agent never sees the real
+    // /data/... path. The first-turn prep recipe (freshCloneScript) clones
+    // cwd-relative (`./<repo>`), so it lands in /workspace; it no longer uses the
+    // absolute /data path that would otherwise need a second self-bind.
     '--bind', opts.taskDir, ws,
-    // Also bind the task dir at its REAL path, so absolute-path operations land
-    // on the PVC. The first-turn prep recipe (ADR-220 freshCloneScript) clones
-    // into the absolute `/data/worktrees/tasks/<id>/<repo>`; without this bind
-    // that path is an empty throwaway dir inside the jail namespace and the
-    // clone vanishes on exit (the /workspace task dir stays empty). Same dir as
-    // /workspace, so the clone shows up there too. Only THIS task dir is bound —
-    // siblings under /data/worktrees/tasks/ are NOT exposed.
-    '--bind', opts.taskDir, opts.taskDir,
     '--chdir', ws,
     '--unshare-user',
     '--unshare-pid',
