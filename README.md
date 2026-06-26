@@ -19,6 +19,11 @@ model/repo code.
   proxy vars + git placeholder creds so `git clone`/`push` still work.
 - Per-session and per-command: each `bwrap` invocation is its own mount
   namespace, so concurrent sessions in one process never collide.
+- **Ensures the session cwd exists first.** OpenCode `FileSystem.access`-checks
+  the session directory before running bash; an own-space SparkTok task never
+  creates `/data/worktrees/tasks/<id>` (the backend can't mkdir the worker PVC),
+  so the hook `mkdir -p`s it before rewriting — the jail is self-sufficient for
+  its own cwd.
 
 ## Why a `tool.execute.before` rewrite (not a `bash` tool override)
 
