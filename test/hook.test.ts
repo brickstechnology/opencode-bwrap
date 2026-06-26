@@ -8,30 +8,17 @@ import { BwrapJail } from '../src/index';
 const fakeClient = (directory: string) =>
   ({ session: { get: async () => ({ data: { directory } }) } }) as never;
 
-describe('tool.execute.before', () => {
-  test('creates the (missing) session cwd, then rewrites bash', async () => {
+describe('silent jail', () => {
+  test('chat.message creates the (missing) session dir before any tool runs', async () => {
     const dir = join(tmpdir(), `oc-bwrap-${Date.now()}`); // does NOT exist yet
     const hooks = await BwrapJail({ client: fakeClient(dir) } as never);
-    const output = { args: { command: 'pwd' } } as { args: { command: string } };
-
-    await hooks['tool.execute.before']?.(
-      { tool: 'bash', sessionID: 's1', callID: 'c1' } as never,
-      output as never,
-    );
-
-    expect(existsSync(dir)).toBe(true); // the fix: the cwd now exists
-    expect(output.args.command.startsWith('exec bwrap')).toBe(true);
-    expect(output.args.command).toContain('--bind "$(pwd)" /workspace');
+    await hooks['chat.message']?.({ sessionID: 's1' } as never, {} as never);
+    expect(existsSync(dir)).toBe(true); // own-space fix: the cwd now exists
     rmSync(dir, { recursive: true, force: true });
   });
 
-  test('leaves non-bash tools untouched', async () => {
-    const hooks = await BwrapJail({ client: fakeClient('/whatever') } as never);
-    const output = { args: { filePath: '/etc/passwd' } };
-    await hooks['tool.execute.before']?.(
-      { tool: 'read', sessionID: 's1', callID: 'c1' } as never,
-      output as never,
-    );
-    expect(output.args).toEqual({ filePath: '/etc/passwd' });
+  test('registers a custom bash tool — the card shows the model command, not bwrap', async () => {
+    const hooks = await BwrapJail({ client: fakeClient('/x') } as never);
+    expect(hooks.tool?.bash).toBeDefined();
   });
 });

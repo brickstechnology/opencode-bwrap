@@ -1,33 +1,48 @@
+import { spawn } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
-import type { Plugin } from '@opencode-ai/plugin';
-import { wrapBashCommand } from './bwrap';
+import { type Plugin, tool } from '@opencode-ai/plugin';
+import { buildBwrapArgv, resolveBinds } from './bwrap';
 import { CONFIG } from './config';
 
+/** Run a bwrap argv, capture stdout+stderr (capped), forward abort. */
+function runJailed(argv: string[], signal?: AbortSignal): Promise<string> {
+  return new Promise(resolve => {
+    const child = spawn('bwrap', argv, signal ? { signal } : {});
+    let buf = '';
+    let truncated = false;
+    const onData = (d: Buffer) => {
+      if (truncated) return;
+      buf += d.toString('utf8');
+      if (buf.length > CONFIG.outputCap) {
+        buf = buf.slice(0, CONFIG.outputCap);
+        truncated = true;
+      }
+    };
+    child.stdout?.on('data', onData);
+    child.stderr?.on('data', onData);
+    child.on('close', code => resolve(buf + (truncated ? '\n[output truncated]' : '') || `(no output; exit ${code})`));
+    child.on('error', err => resolve(`sandbox error: ${String(err)}`));
+  });
+}
+
 /**
- * opencode-bwrap — confine the OpenCode agent's shell. We hook
- * `tool.execute.before` and rewrite the built-in `bash` tool's command so it
- * re-execs inside a per-session bubblewrap jail rooted at `/workspace` (the
- * session's real cwd). Filesystem-confines arbitrary model/repo code and scrubs
- * pod secrets from the shell env — while the built-in bash keeps its live output
- * streaming, timeout, and truncation (we modify its args, not replace the tool;
- * registering a same-name tool merely duplicates it in opencode 1.17).
+ * The **silent** bash jail (opencode-bwrap). A custom `bash` tool whose card
+ * shows the model's own command (`pwd`), while `execute` runs it inside a
+ * per-session bubblewrap jail rooted at `/workspace` — the `bwrap …` is never
+ * displayed. `ctx.directory` (the session's real dir) is bound to `/workspace`.
  *
- * Before rewriting, the hook **ensures the session cwd exists**. OpenCode
- * `FileSystem.access`-checks the session directory (e.g.
- * `/data/worktrees/tasks/<id>`) before running bash, and an own-space SparkTok
- * task never creates that dir (the backend can't mkdir the worker PVC, and the
- * first-turn clone recipe only mkdir's when the task has repos) — so the check
- * fails `NotFound` and bash errors. The hook runs (and is awaited) BEFORE that
- * check, so creating the dir here makes the jail self-sufficient for its own cwd.
+ * `tool.execute.before` does NOT fire for a plugin-registered (custom) tool in
+ * opencode 1.17, so the own-space dir fix lives in **`chat.message`** instead:
+ * it fires at turn start (before any tool runs / before OpenCode's
+ * `FileSystem.access` check), and `mkdir -p`s the session dir so an own-space
+ * task (which never creates `/data/worktrees/tasks/<id>`) doesn't fail NotFound.
  *
- * Path-based file tools (read/write/edit/grep) are a deferred follow-up (a
- * path-guard in the same hook); see README "Roadmap". Loaded via the `plugin`
- * config key.
+ * Trade-off vs the before-hook rewrite: the displayed command is clean (silent)
+ * but a custom tool resolves one result, so live stdout streaming is lost.
  */
 export const BwrapJail: Plugin = async ({ client }) => {
   const dirCache = new Map<string, string>();
 
-  /** Resolve a session's working directory (cached); undefined if unavailable. */
   async function sessionDir(id: string): Promise<string | undefined> {
     const cached = dirCache.get(id);
     if (cached) return cached;
@@ -41,25 +56,30 @@ export const BwrapJail: Plugin = async ({ client }) => {
     }
   }
 
-  return {
-    'tool.execute.before': async (input, output) => {
-      if (input.tool !== 'bash' || typeof output.args?.command !== 'string') {
-        return;
-      }
-      const dir = await sessionDir(input.sessionID);
-      if (dir) {
-        // best-effort: if it fails, OpenCode's original NotFound surfaces unchanged
-        try {
-          await mkdir(dir, { recursive: true });
-        } catch {
-          /* ignore */
-        }
-      }
-      output.args.command = wrapBashCommand(output.args.command, {
-        roBinds: CONFIG.roBinds,
+  const bashTool = tool({
+    description: 'Execute a bash command in the project shell.',
+    args: {
+      command: tool.schema.string().describe('The shell command to execute.'),
+      description: tool.schema.string().optional().describe('One-line description for the UI.'),
+    },
+    async execute(args, ctx) {
+      await mkdir(ctx.directory, { recursive: true }).catch(() => {});
+      const argv = buildBwrapArgv({
+        taskDir: ctx.directory,
+        command: args.command,
+        roBinds: resolveBinds(CONFIG.roBinds),
         envPass: CONFIG.envPass,
       });
+      return runJailed(argv, ctx.abort);
     },
+  });
+
+  return {
+    'chat.message': async input => {
+      const dir = await sessionDir(input.sessionID);
+      if (dir) await mkdir(dir, { recursive: true }).catch(() => {});
+    },
+    tool: { bash: bashTool },
   };
 };
 
