@@ -52,6 +52,55 @@ function shq(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+export interface ArgvOptions extends WrapOptions {
+  /** The session's real dir (opencode `ctx.directory`), bound to `/workspace`. */
+  taskDir: string;
+  /** The shell command to run inside the jail. */
+  command: string;
+}
+
+/**
+ * Build the `bwrap` **argv** (for `spawn('bwrap', argv)`) — the silent path. A
+ * custom `bash` tool already has the session dir as `ctx.directory`, so we bind
+ * it directly (no `"$(pwd)"` shell expansion) and run `bash -lc <command>`
+ * inside. Because bwrap is spawned by the tool's `execute`, the OpenCode tool
+ * card shows the model's clean `command` — the bwrap is never displayed. Same
+ * profile as {@link wrapBashCommand}: `--bind /proc` (S0), net shared for the
+ * egress proxy, `--clearenv` + allowlist scrub the secrets.
+ */
+export function buildBwrapArgv(opts: ArgvOptions): string[] {
+  const ws = opts.workspace ?? '/workspace';
+  const argv: string[] = [];
+
+  for (const p of resolveBinds(opts.roBinds)) {
+    argv.push('--ro-bind', p, p);
+  }
+
+  argv.push(
+    '--bind', '/proc', '/proc',
+    '--dev', '/dev',
+    '--tmpfs', '/tmp',
+    '--bind', opts.taskDir, ws,
+    '--chdir', ws,
+    '--unshare-user',
+    '--unshare-pid',
+    '--unshare-ipc',
+    '--unshare-uts',
+    '--unshare-cgroup',
+    '--die-with-parent',
+    '--clearenv',
+  );
+
+  for (const k of opts.envPass ?? DEFAULT_ENV_PASS) {
+    const v = process.env[k];
+    if (v !== undefined) argv.push('--setenv', k, v);
+  }
+  argv.push('--setenv', 'HOME', ws, '--setenv', 'PWD', ws);
+
+  argv.push('bash', '-lc', opts.command);
+  return argv;
+}
+
 /**
  * Rewrite a bash command so it runs inside a per-session bubblewrap jail rooted
  * at `/workspace`. Returned as a **shell string** the built-in OpenCode `bash`
