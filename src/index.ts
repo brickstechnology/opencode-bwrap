@@ -3,6 +3,7 @@ import { mkdir } from 'node:fs/promises';
 import { type Plugin, tool } from '@opencode-ai/plugin';
 import { buildBwrapArgv, resolveBinds } from './bwrap';
 import { CONFIG } from './config';
+import { guardPath } from './pathGuard';
 
 /** Run a bwrap argv, capture stdout+stderr (capped), forward abort. */
 function runJailed(argv: string[], signal?: AbortSignal): Promise<string> {
@@ -78,6 +79,12 @@ export const BwrapJail: Plugin = async ({ client }) => {
     'chat.message': async input => {
       const dir = await sessionDir(input.sessionID);
       if (dir) await mkdir(dir, { recursive: true }).catch(() => {});
+    },
+    // Confine the UNJAILED built-in file tools (read/write/edit/grep/glob) to the
+    // session root — the bash jail's boundary, for the tools bwrap can't wrap.
+    // tool.execute.before DOES fire for built-in tools (just not the custom bash).
+    'tool.execute.before': async (input, output) => {
+      guardPath(input.tool, output.args, await sessionDir(input.sessionID));
     },
     tool: { bash: bashTool },
   };
