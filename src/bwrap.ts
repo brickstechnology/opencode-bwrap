@@ -31,6 +31,13 @@ export const DEFAULT_ENV_PASS = [
   'GIT_SSL_CAINFO',
   'NODE_EXTRA_CA_CERTS',
   'SSL_CERT_FILE',
+  // gog (Google Drive CLI) over the ADR-156 egress auth-proxy — same pattern as
+  // git above: these are placeholders (`GOG_ACCESS_TOKEN=placeholder`,
+  // `GOG_ACCOUNT=auto`), the real per-user token is injected at the TLS edge by
+  // the proxy and never lives in the container env. Without both, agent-run
+  // `gog` inside the jail fails `missing --account`.
+  'GOG_ACCESS_TOKEN',
+  'GOG_ACCOUNT',
 ] as const;
 
 export interface WrapOptions {
